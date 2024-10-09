@@ -1,0 +1,632 @@
+---
+title: "TFM_CodigoV2"
+author: "Oscar Paul Sanchez Riveros"
+date: "2024-06-16"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+#Librerias a utilizar
+
+library(dplyr)    # for data manipulation
+library(ggplot2)  # for awesome graphics
+library(visdat)   # for additional visualizations
+
+# Feature engineering packages
+library(caret)    # for various ML tasks
+library(recipes)  # for feature engineering tasks
+library(tidymodels)
+library(patchwork)
+library(kknn)
+library(ranger)
+library(themis)
+library(parsnip)
+library(xgboost)
+library(gt)
+library(yardstick)
+library(gridExtra)
+library(kableExtra)
+library(tune)
+library(forcats)
+library(psych)
+library(rpart.plot)
+library(scorecard)
+```
+
+```{r}
+DataTotal_GMC <- read.csv("data/TotalData_GMC.csv")
+
+DataTotal_GMC <- select(DataTotal_GMC, - X)
+
+DataTotal_GMC <- DataTotal_GMC %>% 
+  rename(
+    "Default" = SeriousDlqin2yrs,
+    "Revolving" = RevolvingUtilizationOfUnsecuredLines,
+    "Age" = age,
+    "Days30_59" = NumberOfTime30.59DaysPastDueNotWorse,
+    "CreditLines" = NumberOfOpenCreditLinesAndLoans,
+    "Days90" = NumberOfTimes90DaysLate,
+    "RealEstate" = NumberRealEstateLoansOrLines,
+    "Days60_89" = NumberOfTime60.89DaysPastDueNotWorse,
+    "Dependents" = NumberOfDependents
+  )
+
+head(DataTotal_GMC)
+```
+##ANALISIS EXPLORATORIO
+```{r}
+ggplot(DataTotal_GMC, aes(Default))+
+  geom_bar()
+```
+
+
+##SACAR INCONSISTENCIAS
+
+```{r}
+
+DataGMC_clean <- DataTotal_GMC %>% 
+  filter(!is.na(MonthlyIncome)) %>% 
+  filter(Days30_59 <= 24 & Days60_89 <= 24 & Days90 <= 24) %>% 
+  filter(Age != 0) %>% 
+  filter(DebtRatio <= 100) %>% 
+  filter(Revolving<= 1) %>% 
+  mutate(Late_N = pmax(Days30_59,Days60_89,Days90),
+Late_Dummy = if_else(Late_N > 0,"1","0")) %>% 
+  select(-Days30_59,-Days60_89,-Days90)
+
+head(DataGMC_clean)
+  
+```
+
+```{r}
+describe(DataGMC_clean)
+```
+
+
+```{r}
+DataGMC_clean
+```
+
+
+```{r}
+DataGMC_clean$Default<- as.factor(DataGMC_clean$Default)
+DataGMC_clean$Late_Dummy<- as.factor(DataGMC_clean$Late_Dummy)
+```
+
+##TRANSFORMACION BINNING Y WOE
+
+```{r}
+bins <- woebin(DataGMC_clean, y = "Default") #woebin automatiza el proceso de dicretizacion y calculo de woe
+
+# Paso 2: Visualizar Bins y WOE
+p = woebin_plot(bins, show_iv = FALSE)
+p[1:14]  # Mostrar gráficos de las variables 2 a 14
+
+# Paso 3: Transformar Variables usando Bins y WOE
+DataGMC_bin <- woebin_ply(DataGMC_clean, bins = bins, to = "bin", print_step = 0)
+
+#head(df_bin)
+
+# Paso 4: Limpiar el Data Frame
+#DataGMC_bin <- df_bin %>% select(-bin.1)
+
+# Paso 5: Liberar Memoria
+#rm(p)
+```
+
+##BINNING Y WOE POR CUADROS
+
+
+```{r}
+bins
+```
+
+
+
+```{r}
+DataGMC_bin <- DataGMC_bin %>%
+  mutate_all(~ factor(., levels = unique(.)))
+
+DataGMC_bin
+```
+
+
+
+#DIVISION DE DATOS (TRAIN/TEST)
+
+
+```{r}
+#usando rsample
+
+set.seed(1023)
+split_GMC <- initial_split(DataGMC_bin , prop = 0.8, strata = "Default") # train(80%) test(20%)
+GMC_train <- training(split_GMC) #datos de entrenamiento
+GMC_test <- testing(split_GMC) #datos de prueba
+#mutate(Default = fct_rev(Default))
+```
+
+```{r}
+DataGMC_bin
+```
+
+
+
+```{r}
+GMC_train
+```
+
+```{r}
+GMC_test
+```
+
+
+
+```{r}
+
+rec <- 
+  recipe(Default ~.,data = GMC_train,) %>%
+    step_dummy(all_predictors(),one_hot = TRUE) %>%
+    step_smote(Default)
+  # step_upsample(Default, over_ratio = 1)
+```
+
+
+
+
+##MODELO LOGIT
+
+```{r, render = 'normal_print', fig.height= 3,fig.width=5,fig.align='center'}
+glm_spec <- 
+  logistic_reg() %>%
+  set_engine("glm" , family = binomial) %>%
+  set_mode("classification")
+
+glm_model <- 
+  workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(glm_spec) %>%
+  fit(data = GMC_train)
+
+
+glm_pred <-
+  bind_cols(
+    GMC_test,
+    predict(glm_model,GMC_test),
+    predict(glm_model,GMC_test,type = "prob"))
+
+p1 <- 
+  glm_pred %>% 
+  conf_mat(Default, .pred_class ) %>%
+  autoplot(type = "heatmap")
+
+p2 <-
+  roc_curve(glm_pred, truth = Default, .pred_1) %>% autoplot()
+
+grid.arrange(p1,p2,ncol = 2)
+
+metric_df <-
+  bind_rows(
+    accuracy(glm_pred,truth = Default,.pred_class),
+    roc_auc(glm_pred,truth = Default,.pred_1),
+    sensitivity(glm_pred,truth = Default,.pred_class),
+    specificity(glm_pred,truth = Default,.pred_class),
+    f_meas(glm_pred,truth = Default,.pred_class)) %>%
+  mutate(model = "Simple LR - Base")
+
+metric_df %>%
+  kbl() %>%
+  kable_classic_2(full_width = F)
+
+
+```
+```{r}
+# Extraer los coeficientes del modelo
+coef_df <- tidy(glm_model$fit$fit$fit) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(abs_estimate = abs(estimate)) %>%
+  arrange(desc(abs_estimate)) %>%
+  head(15)
+
+# Crear el gráfico de barras
+ggplot(coef_df, aes(x = reorder(term, abs_estimate), y = abs_estimate)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = "Variable",
+    y = "Valor Absoluto del Coeficiente"
+    
+  ) +
+  theme_minimal()
+```
+
+
+
+
+
+##CREACION DE VALIDACION CRUZADA
+
+```{r}
+# Creating folds for cross validation
+set.seed(1023)
+train_fold <- GMC_train %>% vfold_cv(3,repeats = 1,strata = Default)
+```
+
+
+##MODELO ARBOL DE DESICION
+
+```{r}
+dt_spec <- decision_tree(
+  cost_complexity = tune(),#poda del arbol
+  tree_depth = tune(),#profundidad del arbol
+  min_n = tune()) %>% #numero de hojas
+  set_mode("classification") %>% 
+  set_engine(engine = "rpart", parms = list(split = "gini"))
+
+set.seed(1020)
+
+dt_grid <- grid_regular(
+  cost_complexity( range = c(-5,0), trans = scales::log10_trans()),
+  tree_depth(range = c(1,15)),
+  min_n(range = c(20,150))
+)
+  
+
+dt_model <- 
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(dt_spec)
+
+set.seed(1020)
+
+dt_tune <- tune_grid(dt_model,
+          resamples = train_fold,
+          grid = dt_grid,
+          control = control_grid(verbose = TRUE , save_pred = TRUE),
+          metrics = metric_set(roc_auc)
+          )
+
+highest_acc_dt <- dt_tune %>% 
+  select_best(metric = "roc_auc")
+
+dt_tune %>% 
+  collect_metrics() %>% 
+  filter(.metric == "roc_auc") %>% 
+  arrange(-mean)
+
+
+```
+
+
+``` {r, fig.height= 3,fig.width=5,fig.align='center'}
+
+set.seed(1020)
+dt_model <- finalize_workflow(dt_model,
+                  highest_acc_dt) %>% fit(data = GMC_train)
+
+
+dt_pred <-
+  bind_cols(
+    GMC_test,
+    predict(dt_model,GMC_test),
+    predict(dt_model,GMC_test,type = "prob"))
+
+p1_dt <- 
+  dt_pred %>% 
+  conf_mat(Default, .pred_class) %>%
+  autoplot(type = "heatmap")
+
+p2_dt <-
+  roc_curve(dt_pred, truth = Default, .pred_1) %>% autoplot()
+
+grid.arrange(p1_dt,p2_dt,ncol = 2)
+
+metric_dt <-
+  bind_rows(bind_rows(
+    accuracy(dt_pred,Default,.pred_class),
+    roc_auc(dt_pred,Default,.pred_1),
+    sensitivity(dt_pred,truth = Default,.pred_class),
+    specificity(dt_pred,truth = Default,.pred_class),
+    f_meas(dt_pred,truth = Default,.pred_class)) %>%
+  mutate(model = "Arbol de desicion"))
+
+metric_dt %>%
+  filter(model == "Arbol de desicion") %>%
+  kbl() %>%
+  kable_classic_2(full_width = F)
+
+```
+
+
+
+##TOP 15 VARIABLES MAS IMPORTANTES
+
+
+```{r}
+install.packages("vip")
+library(vip)
+
+vip_obj <- vip(dt_model, num_features = 15)
+
+# Personaliza el color de las barras
+vip_obj + 
+  geom_bar(stat = "identity", fill = "skyblue") +
+  theme_minimal() +
+  labs(
+    x = "Variable",
+    y = "Importancia"
+  )
+```
+
+
+##MODELO RANDOM FOREST
+```{r}
+rf_spec <- rand_forest(
+  mtry = tune(),
+  min_n = tune(),
+  trees = tune(),
+  ) %>%
+  set_mode("classification") %>% 
+  set_engine("ranger", importance = "impurity")
+  
+
+
+rf_grid <- grid_regular(
+  mtry (range = c(3,10)),#numero de variables
+  min_n (range = c(5,200)),#numero de hojas
+  trees (range = c(50,200)),#numero de arboles
+  levels = 3
+  )
+
+rf_model <- 
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(rf_spec)
+
+set.seed(1020)
+
+rf_tune <- tune_grid(rf_model,
+          resamples = train_fold,
+          grid = rf_grid,
+          control = control_grid(verbose = TRUE, save_pred = TRUE),
+          metrics = metric_set(roc_auc)
+          )
+
+highest_rf_acc <- rf_tune %>% 
+  select_best(metric = "roc_auc")
+
+rf_tune %>% 
+  collect_metrics() %>% 
+  filter(.metric == "roc_auc") %>% 
+  arrange(-mean)
+
+
+```
+
+
+
+``` {r, fig.height= 3,fig.width=5,fig.align='center'}
+
+set.seed(1020)
+rf_model <- finalize_workflow(rf_model,
+                  highest_rf_acc) %>% fit(data = GMC_train)
+set.seed(1020)
+
+rf_pred <-
+  bind_cols(
+    GMC_test,
+    predict(rf_model,GMC_test),
+    predict(rf_model,GMC_test,type = "prob"))
+
+p1_rf <- 
+  rf_pred %>% 
+  conf_mat(Default, .pred_class) %>%
+  autoplot(type = "heatmap")
+
+p2_rf <-
+  roc_curve(rf_pred, truth = Default, .pred_1) %>% autoplot()
+
+grid.arrange(p1_rf,p2_rf,ncol = 2)
+
+metric_rf <-
+  bind_rows(bind_rows(
+    accuracy(rf_pred,Default,.pred_class),
+    roc_auc(rf_pred,Default,.pred_1),
+    sensitivity(rf_pred,truth = Default,.pred_class),
+    specificity(rf_pred,truth = Default,.pred_class),
+    f_meas(rf_pred,truth = Default,.pred_class)) %>%
+  mutate(model = "Random Forest"))
+
+metric_rf %>%
+  filter(model == "Random Forest") %>%
+  kbl() %>%
+  kable_classic_2(full_width = F)
+
+```
+
+##TOP 15 VARIABLES MAS IMPORTANTES
+
+```{r}
+library(vip)
+# Visualiza la importancia de las variables
+vip(rf_model$fit$fit, num_features = 15, 
+    geom = "col", 
+    aesthetics = list(fill = "blue")) # Ajusta num_features 
+
+```
+
+
+
+##MODELO GRADIANTE BOOSTING
+
+```{r}
+bt_spec <- boost_tree(
+  mtry = tune(),
+  min_n = tune(),
+  trees = tune()) %>%
+  set_mode("classification") %>% 
+  set_engine(engine = "xgboost")
+
+
+
+bt_grid <- grid_regular(
+  mtry (range = c(3,10)),
+  min_n (range = c(5,100)),
+  trees (range = c(50,500)),
+  levels = 3
+  )
+
+bt_model <- 
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(bt_spec)
+
+set.seed(1020)
+bt_tune <- tune_grid(bt_model,
+          resamples = train_fold,
+          grid = bt_grid,
+          control = control_grid(verbose = TRUE , save_pred = TRUE),
+          metrics = metric_set(roc_auc)
+          )
+
+highest_acc_bt <- bt_tune %>% 
+  select_best(metric = "roc_auc")
+
+bt_tune %>% 
+  collect_metrics() %>% 
+  filter(.metric == "roc_auc") %>% 
+  arrange(-mean)
+
+```
+
+
+``` {r, fig.height= 3,fig.width=5,fig.align='center'}
+set.seed(1020)
+bt_model <- finalize_workflow(bt_model,
+                  highest_acc_bt) %>% fit(data = GMC_train)
+
+
+bt_pred <-
+  bind_cols(
+    GMC_test,
+    predict(bt_model,GMC_test),
+    predict(bt_model,GMC_test,type = "prob"))
+
+p1_bt <- 
+  bt_pred %>% 
+  conf_mat(Default, .pred_class) %>%
+  autoplot(type = "heatmap")
+
+p2_bt <-
+  roc_curve(bt_pred, truth = Default, .pred_1) %>% autoplot()
+
+grid.arrange(p1_bt,p2_bt,ncol = 2)
+
+metric_bt <-
+  bind_rows(bind_rows(
+    accuracy(bt_pred,Default,.pred_class),
+    roc_auc(bt_pred,Default,.pred_1),
+    sensitivity(bt_pred,truth = Default,.pred_class),
+    specificity(bt_pred,truth = Default,.pred_class),
+    f_meas(bt_pred,truth = Default,.pred_class)) %>%
+  mutate(model = "Boost tree"))
+
+metric_bt %>%
+  filter(model == "Boost tree") %>%
+  kbl() %>%
+  kable_classic_2(full_width = F)
+
+```
+
+##TOP 15 VARIABLES MAS IMPORTANTES
+
+```{r}
+# Extraindo o modelo ajustado do workflow
+bt_fit_parsnip <- extract_fit_parsnip(bt_model)
+
+# Mostrar importância das variáveis
+vip(bt_fit_parsnip, num_features = 15, 
+    geom = "col", 
+    aesthetics = list(fill = "black"))
+
+```
+
+
+
+##CALCULO DE CAPITAL REGULATORIO
+
+```{r}
+install.packages("purrr")
+install.packages("pROC")
+```
+```{r}
+library(purrr)
+library(pROC)
+```
+```{r}
+# Definir la fórmula de correlación
+calcular_correlacion <- function(PD) {
+  rho = 0.03 * (1 - exp(-35 * PD)) / (1 - exp(-35)) + 0.16 * (1 - (1 - exp(-35 * PD)) / (1 - exp(-35)))
+  return(rho)
+}
+
+# Definir la fórmula del capital regulatorio
+capital_regulatorio <- function(PD, LGD, EAD) {
+  # Calcular la correlación utilizando la fórmula personalizada
+  rho <- calcular_correlacion(PD)
+  # qnorm(0.999) corresponde al percentil 99.9 de la distribución normal estándar
+  qnorm_999 <- qnorm(0.999)
+  capital <- EAD * (LGD * pnorm((qnorm(PD)/sqrt(1-rho)) + sqrt(rho/(1-rho)) * qnorm_999) - PD * LGD)*12.5
+  return(capital)
+}
+
+# Supongamos que tienes las predicciones de probabilidad de tus modelos
+# Aquí usamos valores ficticios, deberás reemplazarlos con tus datos reales
+prob_logit <- glm_pred$.pred_1   # Probabilidades predichas por el modelo logit
+prob_dt <- dt_pred$.pred_1       # Probabilidades predichas por el árbol de decisión
+prob_rf <- rf_pred$.pred_1       # Probabilidades predichas por el random forest
+prob_bt <- bt_pred$.pred_1       # Probabilidades predichas por el gradiente boosting
+
+# Definir otros parámetros (valores ficticios, deberás ajustarlos según tu caso)
+LGD <- 0.45
+EAD <- 1
+
+# Calcular el capital regulatorio para cada modelo
+capital_logit <- map_dbl(prob_logit, capital_regulatorio, LGD = LGD, EAD = EAD)
+capital_dt <- map_dbl(prob_dt, capital_regulatorio, LGD = LGD, EAD = EAD)
+capital_rf <- map_dbl(prob_rf, capital_regulatorio, LGD = LGD, EAD = EAD)
+capital_bt <- map_dbl(prob_bt, capital_regulatorio, LGD = LGD, EAD = EAD)
+
+# Crear un data frame con los resultados
+resultados <- data.frame(
+  PD = rep(c(prob_logit, prob_dt, prob_rf, prob_bt), times = 4),
+  Modelo = rep(c("Logit", "Decision Tree", "Random Forest", "Gradient Boosting"), each = length(prob_logit)),
+  Capital = c(capital_logit, capital_dt, capital_rf, capital_bt)
+)
+
+# Resumir los resultados
+resumen <- resultados %>%
+  group_by(Modelo) %>%
+  summarise(Capital_Medio = mean(Capital),
+            Desviacion_Estandar = sd(Capital),
+            Capital_Maximo = max(Capital),
+            Capital_Minimo = min(Capital))
+
+print(resumen)
+```
+
+
+
+```{r}
+save(GMC_train,GMC_test,glm_model,dt_model,rf_model,bt_model,file="resultadosTFM.Rdata")
+```
+
+
+
+
