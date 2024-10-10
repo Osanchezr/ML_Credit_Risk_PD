@@ -41,7 +41,20 @@ library(scorecard)
 ```
 
 ```{r}
-DataTotal_GMC <- read.csv("data/TotalData_GMC.csv")
+# Ajustar la ruta al archivo CSV
+relative_path <- "../data/TotalData_GMC.csv"  # Subir un nivel a la carpeta principal
+
+# Verificar si el archivo existe en la ruta relativa
+if (file.exists(relative_path)) {
+  # Leer el archivo CSV
+  DataTotal_GMC <- read.csv(relative_path)
+  print("El archivo se ha leído correctamente.")
+} else {
+  stop(paste("Error: El archivo no se encuentra en la ruta especificada:", relative_path))
+}
+```
+
+```{r}
 
 DataTotal_GMC <- select(DataTotal_GMC, - X)
 
@@ -112,13 +125,7 @@ p[1:14]  # Mostrar gráficos de las variables 2 a 14
 # Paso 3: Transformar Variables usando Bins y WOE
 DataGMC_bin <- woebin_ply(DataGMC_clean, bins = bins, to = "bin", print_step = 0)
 
-#head(df_bin)
 
-# Paso 4: Limpiar el Data Frame
-#DataGMC_bin <- df_bin %>% select(-bin.1)
-
-# Paso 5: Liberar Memoria
-#rm(p)
 ```
 
 ##BINNING Y WOE POR CUADROS
